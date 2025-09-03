@@ -1,6 +1,7 @@
 use std::{
     collections::{BinaryHeap, HashMap, HashSet},
     ops::Deref,
+    sync::Arc,
 };
 
 use heed3::{RoTxn, RwTxn, WithoutTls};
@@ -9,7 +10,7 @@ use crate::helix_engine::vector_core::vector::HVector;
 
 pub struct VecTxn<'outer_scope, 'env> {
     pub txn: &'outer_scope mut RwTxn<'env>,
-    pub cache: HashMap<(u128, usize), HashSet<HVector>>,
+    pub cache: HashMap<(u128, usize), HashSet<Arc<HVector>>>,
 }
 
 impl<'outer_scope, 'env> VecTxn<'outer_scope, 'env> {
@@ -20,14 +21,14 @@ impl<'outer_scope, 'env> VecTxn<'outer_scope, 'env> {
         }
     }
 
-    pub fn set_neighbors(&mut self, id: u128, level: usize, neighbors: &BinaryHeap<HVector>) {
+    pub fn set_neighbors(&mut self, id: u128, level: usize, neighbors: &BinaryHeap<Arc<HVector>>) {
         // get change sets in neighbors
-        let neighbors = neighbors.iter().cloned().collect::<HashSet<_>>();
+        let neighbors = neighbors.iter().map(Arc::clone).collect::<HashSet<_>>();
 
         if let Some(old_neighbors) = self.cache.get(&(id, level)) {
             let old_neighbors_to_delete = old_neighbors
                 .difference(&neighbors)
-                .cloned()
+                .map(Arc::clone)
                 .collect::<HashSet<_>>();
 
             for neighbor in old_neighbors_to_delete {
@@ -43,14 +44,15 @@ impl<'outer_scope, 'env> VecTxn<'outer_scope, 'env> {
         self.cache.insert((id, level), neighbors);
     }
 
-    pub fn get_neighbors(&self, id: u128, level: usize) -> Option<Vec<HVector>> {
+    pub fn get_neighbors(&self, id: u128, level: usize) -> Option<Vec<Arc<HVector>>> {
         self.cache
             .get(&(id, level))
-            .map(|x| x.iter().cloned().collect())
+            .map(|x| x.iter().map(Arc::clone).collect())
     }
 
-    pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<HVector>) {
-        self.cache.insert((id, level), neighbors.iter().cloned().collect());
+    pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<Arc<HVector>>) {
+        self.cache
+            .insert((id, level), neighbors.iter().map(Arc::clone).collect());
     }
 
     pub fn get_rtxn(&self) -> &RoTxn<'env, WithoutTls> {

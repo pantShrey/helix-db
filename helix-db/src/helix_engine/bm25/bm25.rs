@@ -1,16 +1,16 @@
 use crate::{
+    debug_println,
     helix_engine::{
         storage_core::HelixGraphStorage,
         types::GraphError,
         vector_core::{hnsw::HNSW, vector::HVector},
     },
     protocol::value::Value,
-    debug_println,
 };
 
-use heed3::{types::*, Database, Env, RoTxn, RwTxn};
+use heed3::{Database, Env, RoTxn, RwTxn, types::*};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use tokio::task;
 
 const DB_BM25_INVERTED_INDEX: &str = "bm25_inverted_index"; // term -> list of (doc_id, tf)
@@ -82,10 +82,10 @@ impl HBM25Config {
 
         let doc_lengths_db: Database<U128<heed3::byteorder::BE>, U32<heed3::byteorder::BE>> =
             graph_env
-            .database_options()
-            .types::<U128<heed3::byteorder::BE>, U32<heed3::byteorder::BE>>()
-            .name(DB_BM25_DOC_LENGTHS)
-            .create(wtxn)?;
+                .database_options()
+                .types::<U128<heed3::byteorder::BE>, U32<heed3::byteorder::BE>>()
+                .name(DB_BM25_DOC_LENGTHS)
+                .create(wtxn)?;
 
         let term_frequencies_db: Database<Bytes, U32<heed3::byteorder::BE>> = graph_env
             .database_options()
@@ -150,7 +150,7 @@ impl BM25 for HBM25Config {
             let current_df = self.term_frequencies_db.get(txn, term_bytes)?.unwrap_or(0);
             self.term_frequencies_db
                 .put(txn, term_bytes, &(current_df + 1))?;
-            }
+        }
 
         let mut metadata = if let Some(data) = self.metadata_db.get(txn, METADATA_KEY)? {
             bincode::deserialize::<BM25Metadata>(data)?
@@ -375,18 +375,19 @@ impl HybridSearch for HelixGraphStorage {
             }
         });
 
-        let vector_handle = task::spawn_blocking(move || -> Result<Option<Vec<HVector>>, GraphError> {
-            let txn = graph_env_vector.read_txn()?;
-            let results = self.vectors.search::<fn(&HVector, &RoTxn) -> bool>(
-                &txn,
-                &query_vector_owned,
-                limit * 2,
-                "vector",
-                None,
-                false,
-            )?;
-            Ok(Some(results))
-        });
+        let vector_handle: task::JoinHandle<Result<Option<Vec<Arc<HVector>>>, GraphError>> =
+            task::spawn_blocking(move || -> Result<Option<Vec<Arc<HVector>>>, GraphError> {
+                let txn = graph_env_vector.read_txn()?;
+                let results = self.vectors.search::<fn(&HVector, &RoTxn) -> bool>(
+                    &txn,
+                    &query_vector_owned,
+                    limit * 2,
+                    "vector",
+                    None,
+                    false,
+                )?;
+                Ok(Some(results))
+            });
 
         let (bm25_results, vector_results) = match tokio::try_join!(bm25_handle, vector_handle) {
             Ok((a, b)) => (a, b),
@@ -409,7 +410,7 @@ impl HybridSearch for HelixGraphStorage {
                     .entry(doc_id)
                     .and_modify(|existing_score| *existing_score += (1.0 - alpha) * similarity)
                     .or_insert((1.0 - alpha) * similarity); // correction made here from score as f32 to similarity
-                }
+            }
         }
 
         let mut results = combined_scores.into_iter().collect::<Vec<(u128, f32)>>();
@@ -437,4 +438,3 @@ impl BM25Flatten for HashMap<String, Value> {
             })
     }
 }
-

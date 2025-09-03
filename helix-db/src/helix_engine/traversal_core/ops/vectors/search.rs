@@ -6,7 +6,7 @@ use crate::helix_engine::{
     vector_core::{hnsw::HNSW, vector::HVector},
 };
 use helix_macros::debug_trace;
-use std::iter::once;
+use std::{iter::once, sync::Arc};
 
 pub struct SearchV<I: Iterator<Item = Result<TraversalValue, GraphError>>> {
     iter: I,
@@ -51,15 +51,23 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
         K: TryInto<usize>,
         K::Error: std::fmt::Debug,
     {
-        let vectors =
-            self.storage
-                .vectors
-                .search(self.txn, query, k.try_into().unwrap(), label, filter, false);
+        let vectors = self.storage.vectors.search(
+            self.txn,
+            query,
+            k.try_into().unwrap(),
+            label,
+            filter,
+            false,
+        );
 
         let iter = match vectors {
             Ok(vectors) => vectors
                 .into_iter()
-                .map(|vector| Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector)))
+                .map(|vector| {
+                    Ok::<TraversalValue, GraphError>(TraversalValue::Vector(Arc::unwrap_or_clone(
+                        vector,
+                    )))
+                })
                 .collect::<Vec<_>>()
                 .into_iter(),
             Err(VectorError::VectorNotFound(id)) => {
@@ -104,4 +112,3 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
         }
     }
 }
-

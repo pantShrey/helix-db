@@ -1,3 +1,6 @@
+
+use std::sync::Arc;
+
 use crate::helix_engine::vector_core::txn::VecTxn;
 use crate::helix_engine::vector_core::vector::HVector;
 use crate::{helix_engine::types::VectorError, protocol::value::Value};
@@ -23,7 +26,7 @@ pub trait HNSW {
         label: &str,
         filter: Option<&[F]>,
         should_trickle: bool,
-    ) -> Result<Vec<HVector>, VectorError>
+    ) -> Result<Vec<Arc<HVector>>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool;
 
@@ -37,7 +40,16 @@ pub trait HNSW {
     /// # Returns
     ///
     /// An HVector of the data inserted
-    fn insert<F>(
+    fn insert_with_lmdb_txn<F>(
+        &self,
+        txn: &mut RwTxn,
+        data: &[f64],
+        fields: Option<Vec<(String, Value)>>,
+    ) -> Result<HVector, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool;
+
+    fn insert_with_vec_txn<F>(
         &self,
         txn: &mut VecTxn,
         data: &[f64],

@@ -1426,7 +1426,7 @@ mod tests {
         for vec in vectors {
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
+                .insert_with_lmdb_txn::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
         }
         wtxn.commit().unwrap();
 
@@ -1468,7 +1468,7 @@ mod tests {
         for vec in vectors {
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
+                .insert_with_lmdb_txn::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
         }
         wtxn.commit().unwrap();
 
@@ -1511,7 +1511,7 @@ mod tests {
         for vec in vectors {
             let _ = storage
                 .vectors
-                .insert::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
+                .insert_with_lmdb_txn::<fn(&HVector, &RoTxn) -> bool>(&mut wtxn, &vec, None);
         }
         wtxn.commit().unwrap();
 

@@ -148,7 +148,7 @@ fn test_hnsw_insert() {
     let vectors = gen_sim_vecs(n_base, dims, 0.8);
 
     for data in vectors {
-        let vec = index.insert::<Filter>(&mut txn, &data, None).unwrap();
+        let vec = index.insert_with_lmdb_txn::<Filter>(&mut txn, &data, None).unwrap();
         assert_eq!(vec.data, data);
         assert!(vec.properties.is_none());
     }
@@ -169,7 +169,7 @@ fn test_get_vector() {
 
     let mut all_vectors: Vec<HVector> = Vec::with_capacity(n_base);
     for data in vectors {
-        all_vectors.push(index.insert::<Filter>(&mut txn, &data, None).unwrap());
+        all_vectors.push(index.insert_with_lmdb_txn::<Filter>(&mut txn, &data, None).unwrap());
     }
 
     for inserted_vec in all_vectors {
@@ -211,7 +211,7 @@ fn test_hnsw_search() {
 
     let mut base_all_vectors: Vec<HVector> = Vec::new();
     for data in base_vectors.iter() {
-        base_all_vectors.push(index.insert::<Filter>(&mut txn, &data, None).unwrap());
+        base_all_vectors.push(index.insert_with_lmdb_txn::<Filter>(&mut txn, &data, None).unwrap());
     }
     txn.commit().unwrap();
 

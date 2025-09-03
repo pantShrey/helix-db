@@ -319,7 +319,7 @@ mod tests {
         let over_all_time = Instant::now();
         for (i, data) in base_vectors.iter().enumerate() {
             let start_time = Instant::now();
-            let vec = index.insert::<Filter>(&mut txn, &data, None).unwrap();
+            let vec = index.insert_with_lmdb_txn::<Filter>(&mut txn, &data, None).unwrap();
             let time = start_time.elapsed();
             base_all_vectors.push(vec);
             //println!("{} => inserting in {} ms", i, time.as_millis());

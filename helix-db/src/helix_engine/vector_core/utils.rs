@@ -1,12 +1,10 @@
 use crate::{
-    helix_engine::{
-        types::VectorError,
-        vector_core::vector::HVector,
-    },
-    protocol::value::Value, utils::filterable::Filterable
+    helix_engine::{types::VectorError, vector_core::vector::HVector},
+    protocol::value::Value,
+    utils::filterable::Filterable,
 };
-use heed3::{Database, types::Bytes, RoTxn};
-use std::{cmp::Ordering, collections::BinaryHeap};
+use heed3::{Database, RoTxn, types::Bytes};
+use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc};
 
 #[derive(PartialEq)]
 pub(super) struct Candidate {
@@ -95,12 +93,12 @@ pub trait VectorFilter {
         label: &str,
         txn: &RoTxn,
         db: Database<Bytes, Bytes>,
-    ) -> Result<Vec<HVector>, VectorError>
+    ) -> Result<Vec<Arc<HVector>>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool;
 }
 
-impl VectorFilter for BinaryHeap<HVector> {
+impl VectorFilter for BinaryHeap<Arc<HVector>> {
     #[inline(always)]
     fn to_vec_with_filter<F, const SHOULD_CHECK_DELETED: bool>(
         &mut self,
@@ -109,7 +107,7 @@ impl VectorFilter for BinaryHeap<HVector> {
         label: &str,
         txn: &RoTxn,
         db: Database<Bytes, Bytes>,
-    ) -> Result<Vec<HVector>, VectorError>
+    ) -> Result<Vec<Arc<HVector>>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
     {
@@ -117,20 +115,23 @@ impl VectorFilter for BinaryHeap<HVector> {
         for _ in 0..k {
             // while pop check filters and pop until one passes
             while let Some(mut item) = self.pop() {
-                item.properties = match db
-                    .get(txn, &item.get_id().to_be_bytes())?
-                    {
-                        Some(bytes) => Some(bincode::deserialize(bytes).map_err(VectorError::from)?),
+                if let Some(item) = Arc::get_mut(&mut item) {
+                    item.properties = match db.get(txn, &item.get_id().to_be_bytes())? {
+                        Some(bytes) => {
+                            Some(bincode::deserialize(bytes).map_err(VectorError::from)?)
+                        }
                         None => None, // TODO: maybe should be an error?
                     };
 
-                if SHOULD_CHECK_DELETED
-                    && let Ok(is_deleted) = item.check_property("is_deleted")
+                    if SHOULD_CHECK_DELETED
+                        && let Ok(is_deleted) = item.check_property("is_deleted")
                         && let Value::Boolean(is_deleted) = is_deleted.as_ref()
-                            && *is_deleted {
-                                continue;
-                }
+                        && *is_deleted
+                    {
+                        continue;
+                    }
 
+                }
                 if item.label() == label
                     && (filter.is_none() || filter.unwrap().iter().all(|f| f(&item, txn)))
                 {
@@ -143,4 +144,3 @@ impl VectorFilter for BinaryHeap<HVector> {
         Ok(result)
     }
 }
-
