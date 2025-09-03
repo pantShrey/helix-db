@@ -17,7 +17,7 @@ pub trait HNSW {
     /// A vector of tuples containing the id and distance of the nearest neighbors
     fn search<F>(
         &self,
-        txn: &VecTxn,
+        txn: &RoTxn,
         query: &[f64],
         k: usize,
         label: &str,

@@ -49,6 +49,10 @@ impl<'outer_scope, 'env> VecTxn<'outer_scope, 'env> {
             .map(|x| x.iter().cloned().collect())
     }
 
+    pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<HVector>) {
+        self.cache.insert((id, level), neighbors.iter().cloned().collect());
+    }
+
     pub fn get_rtxn(&self) -> &RoTxn<'env, WithoutTls> {
         self.txn
     }

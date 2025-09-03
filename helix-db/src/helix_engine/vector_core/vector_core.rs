@@ -152,10 +152,10 @@ impl VectorCore {
         Ok(())
     }
 
-    #[inline(always)]
-    fn get_neighbors<F>(
+    #[inline]
+    fn _get_neighbors_with_vec_txn<F>(
         &self,
-        txn: &VecTxn,
+        txn: &mut VecTxn,
         id: u128,
         level: usize,
         filter: Option<&[F]>,
@@ -167,6 +167,57 @@ impl VectorCore {
             return Ok(neighbors);
         }
 
+        let out_key = Self::out_edges_key(id, level, None);
+        let mut neighbors = Vec::with_capacity(self.config.m_max_0.min(self.config.min_neighbors));
+
+        let iter = self
+            .edges_db
+            .lazily_decode_data()
+            .prefix_iter(txn, &out_key)?;
+
+        let prefix_len = out_key.len();
+
+        for result in iter {
+            let (key, _) = result?;
+
+            let mut arr = [0u8; 16];
+            let len = std::cmp::min(key.len(), 16);
+            arr[..len].copy_from_slice(&key[prefix_len..(prefix_len + len)]);
+            let neighbor_id = u128::from_be_bytes(arr);
+
+            if neighbor_id == id {
+                continue;
+            }
+
+            let vector = self.get_vector(txn, neighbor_id, level, false)?;
+
+            let passes_filters = match filter {
+                Some(filter_slice) => filter_slice.iter().all(|f| f(&vector, txn)),
+                None => true,
+            };
+
+            if passes_filters {
+                neighbors.push(vector);
+            }
+        }
+        neighbors.shrink_to_fit();
+
+        txn.insert_neighbors(id, level, &neighbors);
+
+        Ok(neighbors)
+    }
+
+    #[inline(always)]
+    fn _get_neighbors_with_lmdb_txn<F>(
+        &self,
+        txn: &RoTxn,
+        id: u128,
+        level: usize,
+        filter: Option<&[F]>,
+    ) -> Result<Vec<HVector>, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool,
+    {
         let out_key = Self::out_edges_key(id, level, None);
         let mut neighbors = Vec::with_capacity(self.config.m_max_0.min(self.config.min_neighbors));
 
@@ -225,9 +276,9 @@ impl VectorCore {
         Ok(())
     }
 
-    fn select_neighbors<'a, F>(
+    fn _select_neighbors_with_vec_txn<'a, F>(
         &'a self,
-        txn: &'a VecTxn,
+        txn: &'a mut VecTxn,
         query: &'a HVector,
         mut cands: BinaryHeap<HVector>,
         level: usize,
@@ -246,7 +297,9 @@ impl VectorCore {
         let mut visited: HashSet<u128> = HashSet::new();
         let mut result = BinaryHeap::with_capacity(m * cands.len());
         for candidate in cands.iter() {
-            for mut neighbor in self.get_neighbors(txn, candidate.get_id(), level, filter)? {
+            for mut neighbor in
+                self._get_neighbors_with_vec_txn(txn, candidate.get_id(), level, filter)?
+            {
                 if !visited.insert(neighbor.get_id()) {
                     continue;
                 }
@@ -274,9 +327,60 @@ impl VectorCore {
         Ok(result.take_inord(m))
     }
 
-    fn search_level<'a, F>(
+    fn _select_neighbors_with_lmdb_txn<'a, F>(
         &'a self,
-        txn: &'a VecTxn,
+        txn: &'a RoTxn,
+        query: &'a HVector,
+        mut cands: BinaryHeap<HVector>,
+        level: usize,
+        should_extend: bool,
+        filter: Option<&[F]>,
+    ) -> Result<BinaryHeap<HVector>, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool,
+    {
+        let m = self.config.m;
+
+        if !should_extend {
+            return Ok(cands.take_inord(m));
+        }
+
+        let mut visited: HashSet<u128> = HashSet::new();
+        let mut result = BinaryHeap::with_capacity(m * cands.len());
+        for candidate in cands.iter() {
+            for mut neighbor in
+                self._get_neighbors_with_lmdb_txn(txn, candidate.get_id(), level, filter)?
+            {
+                if !visited.insert(neighbor.get_id()) {
+                    continue;
+                }
+
+                neighbor.set_distance(neighbor.distance_to(query)?);
+
+                /*
+                let passes_filters = match filter {
+                    Some(filter_slice) => filter_slice.iter().all(|f| f(&neighbor, txn)),
+                    None => true,
+                };
+
+                if passes_filters {
+                    result.push(neighbor);
+                }
+                */
+
+                if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, &txn)) {
+                    result.push(neighbor);
+                }
+            }
+        }
+
+        result.extend_inord(cands);
+        Ok(result.take_inord(m))
+    }
+
+    fn _search_level_with_lmdb_txn<'a, F>(
+        &'a self,
+        txn: &'a RoTxn,
         query: &'a HVector,
         entry_point: &'a mut HVector,
         ef: usize,
@@ -313,7 +417,75 @@ impl VectorCore {
                 None
             };
 
-            self.get_neighbors(txn, curr_cand.id, level, filter)?
+            self._get_neighbors_with_lmdb_txn(txn, curr_cand.id, level, filter)?
+                .into_iter()
+                .filter(|neighbor| visited.insert(neighbor.get_id()))
+                .filter_map(|mut neighbor| {
+                    let distance = neighbor.distance_to(query).ok()?;
+
+                    if max_distance.is_none_or(|max| distance < max) {
+                        neighbor.set_distance(distance);
+                        Some((neighbor, distance))
+                    } else {
+                        None
+                    }
+                })
+                .for_each(|(neighbor, distance)| {
+                    candidates.push(Candidate {
+                        id: neighbor.get_id(),
+                        distance,
+                    });
+
+                    results.push(neighbor);
+
+                    if results.len() > ef {
+                        results = results.take_inord(ef);
+                    }
+                });
+        }
+        Ok(results)
+    }
+
+    fn _search_level_with_vec_txn<'a, F>(
+        &'a self,
+        txn: &'a mut VecTxn,
+        query: &'a HVector,
+        entry_point: &'a mut HVector,
+        ef: usize,
+        level: usize,
+        filter: Option<&[F]>,
+    ) -> Result<BinaryHeap<HVector>, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool,
+    {
+        let mut visited: HashSet<u128> = HashSet::new();
+        let mut candidates: BinaryHeap<Candidate> = BinaryHeap::new();
+        let mut results: BinaryHeap<HVector> = BinaryHeap::new();
+
+        entry_point.set_distance(entry_point.distance_to(query)?);
+        candidates.push(Candidate {
+            id: entry_point.get_id(),
+            distance: entry_point.get_distance(),
+        });
+        results.push(entry_point.clone());
+        visited.insert(entry_point.get_id());
+
+        while let Some(curr_cand) = candidates.pop() {
+            if results.len() >= ef
+                && results
+                    .get_max()
+                    .is_none_or(|f| curr_cand.distance > f.get_distance())
+            {
+                break;
+            }
+
+            let max_distance = if results.len() >= ef {
+                results.get_max().map(|f| f.get_distance())
+            } else {
+                None
+            };
+
+            self._get_neighbors_with_vec_txn(txn, curr_cand.id, level, filter)?
                 .into_iter()
                 .filter(|neighbor| visited.insert(neighbor.get_id()))
                 .filter_map(|mut neighbor| {
@@ -382,7 +554,7 @@ impl HNSW for VectorCore {
 
     fn search<F>(
         &self,
-        txn: &VecTxn,
+        txn: &RoTxn,
         query: &[f64],
         k: usize,
         label: &str,
@@ -400,7 +572,7 @@ impl HNSW for VectorCore {
         let curr_level = entry_point.get_level();
 
         for level in (1..=curr_level).rev() {
-            let mut nearest = self.search_level(
+            let mut nearest = self._search_level_with_lmdb_txn(
                 txn,
                 &query,
                 &mut entry_point,
@@ -417,7 +589,7 @@ impl HNSW for VectorCore {
             }
         }
 
-        let mut candidates = self.search_level(
+        let mut candidates = self._search_level_with_lmdb_txn(
             txn,
             &query,
             &mut entry_point,
@@ -474,7 +646,8 @@ impl HNSW for VectorCore {
         let l = entry_point.get_level();
         let mut curr_ep = entry_point;
         for level in (new_level + 1..=l).rev() {
-            let nearest = self.search_level::<F>(txn, &query, &mut curr_ep, 1, level, None)?;
+            let nearest =
+                self._search_level_with_vec_txn::<F>(txn, &query, &mut curr_ep, 1, level, None)?;
             curr_ep = nearest
                 .peek()
                 .ok_or(VectorError::VectorCoreError(
@@ -484,7 +657,7 @@ impl HNSW for VectorCore {
         }
 
         for level in (0..=l.min(new_level)).rev() {
-            let nearest = self.search_level::<F>(
+            let nearest = self._search_level_with_vec_txn::<F>(
                 txn,
                 &query,
                 &mut curr_ep,
@@ -494,13 +667,15 @@ impl HNSW for VectorCore {
             )?;
             curr_ep = nearest.peek().unwrap().clone();
 
-            let neighbors = self.select_neighbors::<F>(txn, &query, nearest, level, true, None)?;
+            let neighbors =
+                self._select_neighbors_with_vec_txn::<F>(txn, &query, nearest, level, true, None)?;
             self.set_neighbours(txn, query.get_id(), &neighbors, level)?;
             for e in &neighbors {
                 let id = e.get_id();
-                let e_conns = BinaryHeap::from(self.get_neighbors::<F>(txn, id, level, None)?);
-                let e_new_conn =
-                    self.select_neighbors::<F>(txn, &query, e_conns, level, true, None)?;
+                let e_conns =
+                    BinaryHeap::from(self._get_neighbors_with_vec_txn::<F>(txn, id, level, None)?);
+                let e_new_conn = self
+                    ._select_neighbors_with_vec_txn::<F>(txn, &query, e_conns, level, true, None)?;
                 // neighbor_updates.push((id, e_new_conn));
                 self.set_neighbours(txn, id, &e_new_conn, level)?;
             }
