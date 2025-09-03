@@ -3,7 +3,10 @@ use crate::{
     helix_engine::{
         types::VectorError,
         vector_core::{
-            hnsw::HNSW, txn::VecTxn, utils::{Candidate, HeapOps, VectorFilter}, vector::HVector
+            hnsw::HNSW,
+            txn::VecTxn,
+            utils::{Candidate, HeapOps, VectorFilter},
+            vector::HVector,
         },
     },
     protocol::value::Value,
@@ -211,11 +214,11 @@ impl VectorCore {
     }
 
     #[inline(always)]
-    fn set_neighbours<'scope, 'env, 'a>(
+    fn set_neighbours(
         &self,
-        txn: &'scope mut VecTxn<'scope, 'env>,
+        txn: &mut VecTxn,
         id: u128,
-        neighbors: &'scope BinaryHeap<HVector>,
+        neighbors: &BinaryHeap<HVector>,
         level: usize,
     ) -> Result<(), VectorError> {
         txn.set_neighbors(id, level, neighbors);
@@ -224,7 +227,7 @@ impl VectorCore {
 
     fn select_neighbors<'a, F>(
         &'a self,
-        txn: &VecTxn,
+        txn: &'a VecTxn,
         query: &'a HVector,
         mut cands: BinaryHeap<HVector>,
         level: usize,
@@ -273,7 +276,7 @@ impl VectorCore {
 
     fn search_level<'a, F>(
         &'a self,
-        txn: &VecTxn,
+        txn: &'a VecTxn,
         query: &'a HVector,
         entry_point: &'a mut HVector,
         ef: usize,
@@ -433,9 +436,9 @@ impl HNSW for VectorCore {
         Ok(results)
     }
 
-    fn insert<'scope, 'env, F>(
+    fn insert<F>(
         &self,
-        txn: &'scope mut VecTxn<'scope, 'env>,
+        txn: &mut VecTxn,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
     ) -> Result<HVector, VectorError>
@@ -493,12 +496,12 @@ impl HNSW for VectorCore {
 
             let neighbors = self.select_neighbors::<F>(txn, &query, nearest, level, true, None)?;
             self.set_neighbours(txn, query.get_id(), &neighbors, level)?;
-
-            for e in neighbors {
+            for e in &neighbors {
                 let id = e.get_id();
                 let e_conns = BinaryHeap::from(self.get_neighbors::<F>(txn, id, level, None)?);
                 let e_new_conn =
                     self.select_neighbors::<F>(txn, &query, e_conns, level, true, None)?;
+                // neighbor_updates.push((id, e_new_conn));
                 self.set_neighbours(txn, id, &e_new_conn, level)?;
             }
         }

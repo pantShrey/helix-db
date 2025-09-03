@@ -1,6 +1,7 @@
 pub mod graph_visualization;
 pub mod storage_methods;
 pub mod version_info;
+pub mod txn;
 
 use crate::{
     helix_engine::{

@@ -37,9 +37,9 @@ pub trait HNSW {
     /// # Returns
     ///
     /// An HVector of the data inserted
-    fn insert<'scope, 'env, F>(
+    fn insert<F>(
         &self,
-        txn: &'scope mut VecTxn<'scope, 'env>,
+        txn: &mut VecTxn,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
     ) -> Result<HVector, VectorError>
