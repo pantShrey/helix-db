@@ -6,7 +6,7 @@ use crate::helix_engine::{
     vector_core::{hnsw::HNSW, vector::HVector},
 };
 use helix_macros::debug_trace;
-use std::{iter::once, sync::Arc};
+use std::iter::once;
 
 pub struct SearchV<I: Iterator<Item = Result<TraversalValue, GraphError>>> {
     iter: I,
@@ -63,11 +63,7 @@ impl<'a, I: Iterator<Item = Result<TraversalValue, GraphError>> + 'a> SearchVAda
         let iter = match vectors {
             Ok(vectors) => vectors
                 .into_iter()
-                .map(|vector| {
-                    Ok::<TraversalValue, GraphError>(TraversalValue::Vector(Arc::unwrap_or_clone(
-                        vector,
-                    )))
-                })
+                .map(|vector| Ok::<TraversalValue, GraphError>(TraversalValue::Vector(vector)))
                 .collect::<Vec<_>>()
                 .into_iter(),
             Err(VectorError::VectorNotFound(id)) => {

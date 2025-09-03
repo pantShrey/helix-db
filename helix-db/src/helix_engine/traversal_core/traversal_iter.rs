@@ -146,7 +146,7 @@ impl<'scope, 'env, I: Iterator<Item = Result<TraversalValue, GraphError>>>
 pub struct RwVecTraversalIterator<'scope, 'env, I> {
     pub inner: I,
     pub storage: Arc<HelixGraphStorage>,
-    pub txn: &'scope mut VecTxn<'scope, 'env>,
+    pub txn: &'scope mut VecTxn<'env>,
 }
 
 // implementing iterator for TraversalIterator
@@ -165,7 +165,7 @@ impl<'scope, 'env, I: Iterator<Item = Result<TraversalValue, GraphError>>>
 {
     pub fn new(
         storage: Arc<HelixGraphStorage>,
-        txn: &'scope mut VecTxn<'scope, 'env>,
+        txn: &'scope mut VecTxn<'env>,
         inner: I,
     ) -> Self {
         Self {

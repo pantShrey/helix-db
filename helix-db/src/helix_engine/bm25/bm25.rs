@@ -386,7 +386,7 @@ impl HybridSearch for HelixGraphStorage {
                     None,
                     false,
                 )?;
-                Ok(Some(results))
+                Ok(Some(results.into_iter().map(|i| Arc::new(i)).collect()))
             });
 
         let (bm25_results, vector_results) = match tokio::try_join!(bm25_handle, vector_handle) {

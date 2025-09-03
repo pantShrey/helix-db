@@ -1,5 +1,4 @@
-
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::helix_engine::vector_core::txn::VecTxn;
 use crate::helix_engine::vector_core::vector::HVector;
@@ -26,7 +25,19 @@ pub trait HNSW {
         label: &str,
         filter: Option<&[F]>,
         should_trickle: bool,
-    ) -> Result<Vec<Arc<HVector>>, VectorError>
+    ) -> Result<Vec<HVector>, VectorError>
+    where
+        F: Fn(&HVector, &RoTxn) -> bool;
+
+    fn search_with_vec_txn<F>(
+        &self,
+        txn: &mut VecTxn,
+        query: &[f64],
+        k: usize,
+        label: &str,
+        filter: Option<&[F]>,
+        should_trickle: bool,
+    ) -> Result<Vec<Rc<HVector>>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool;
 

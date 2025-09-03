@@ -1,70 +1,119 @@
 use std::{
     collections::{BinaryHeap, HashMap, HashSet},
     ops::Deref,
-    sync::Arc,
+    rc::Rc,
 };
 
-use heed3::{RoTxn, RwTxn, WithoutTls};
+use heed3::{
+    Database, RoTxn, RwTxn, WithoutTls,
+    types::{Bytes, Unit},
+};
 
-use crate::helix_engine::vector_core::vector::HVector;
+use crate::helix_engine::{
+    types::VectorError,
+    vector_core::{vector::HVector, vector_core::VectorCore},
+};
 
-pub struct VecTxn<'outer_scope, 'env> {
-    pub txn: &'outer_scope mut RwTxn<'env>,
-    pub cache: HashMap<(u128, usize), HashSet<Arc<HVector>>>,
+pub struct VecTxn<'env> {
+    pub txn: RwTxn<'env>,
+    pub cache: HashMap<(u128, usize), HashSet<Rc<HVector>>>,
+    pub cache_distances: HashMap<(u128, usize), f64>,
 }
 
-impl<'outer_scope, 'env> VecTxn<'outer_scope, 'env> {
-    pub fn new(txn: &'outer_scope mut RwTxn<'env>) -> Self {
+impl<'env> VecTxn<'env> {
+    pub fn new(txn: RwTxn<'env>) -> Self {
         Self {
             txn,
-            cache: HashMap::with_capacity(4096),
+            cache: HashMap::with_capacity(256),
+            cache_distances: HashMap::with_capacity(256),
         }
     }
 
-    pub fn set_neighbors(&mut self, id: u128, level: usize, neighbors: &BinaryHeap<Arc<HVector>>) {
+    pub fn set_neighbors(&mut self, id: u128, level: usize, neighbors: &BinaryHeap<Rc<HVector>>) {
         // get change sets in neighbors
-        let neighbors = neighbors.iter().map(Arc::clone).collect::<HashSet<_>>();
+        let neighbors = neighbors.iter().map(Rc::clone).collect::<HashSet<_>>();
 
-        if let Some(old_neighbors) = self.cache.get(&(id, level)) {
-            let old_neighbors_to_delete = old_neighbors
-                .difference(&neighbors)
-                .map(Arc::clone)
-                .collect::<HashSet<_>>();
+        let old_neighbors = self.cache.get(&(id, level)).cloned().unwrap_or_default();
+        let old_neighbors_to_delete = old_neighbors
+            .difference(&neighbors)
+            .map(Rc::clone)
+            .collect::<HashSet<_>>();
 
-            for neighbor in old_neighbors_to_delete {
-                if let Some(neighbor_set) = self
-                    .cache
-                    .get_mut(&(neighbor.get_id(), neighbor.get_level()))
-                {
-                    neighbor_set.remove(&neighbor);
-                }
+        let neighbors_to_add = neighbors
+            .difference(&old_neighbors)
+            .map(Rc::clone)
+            .collect::<HashSet<_>>();
+
+        for neighbor in old_neighbors_to_delete {
+            if let Some(neighbor_set) = self
+                .cache
+                .get_mut(&(neighbor.get_id(), neighbor.get_level()))
+            {
+                neighbor_set.remove(&neighbor);
+            }
+        }
+
+        for neighbor in neighbors_to_add {
+            if let Some(neighbor_set) = self
+                .cache
+                .get_mut(&(neighbor.get_id(), neighbor.get_level()))
+            {
+                neighbor_set.insert(neighbor);
             }
         }
 
         self.cache.insert((id, level), neighbors);
     }
 
-    pub fn get_neighbors(&self, id: u128, level: usize) -> Option<Vec<Arc<HVector>>> {
-        self.cache
-            .get(&(id, level))
-            .map(|x| x.iter().map(Arc::clone).collect())
+    pub fn set_distance(&mut self, id: u128, level: usize, distance: f64) {
+        self.cache_distances.insert((id, level), distance);
+    }
+    pub fn get_distance(&self, id: u128, level: usize) -> f64 {
+        *self.cache_distances.get(&(id, level)).unwrap_or(&2.0)
     }
 
-    pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<Arc<HVector>>) {
+    pub fn get_neighbors(&self, id: u128, level: usize) -> Option<Vec<Rc<HVector>>> {
         self.cache
-            .insert((id, level), neighbors.iter().map(Arc::clone).collect());
+            .get(&(id, level))
+            .map(|x| x.iter().map(Rc::clone).collect())
+    }
+
+    pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<Rc<HVector>>) {
+        self.cache
+            .insert((id, level), neighbors.iter().map(Rc::clone).collect());
     }
 
     pub fn get_rtxn(&self) -> &RoTxn<'env, WithoutTls> {
-        self.txn
+        &self.txn
     }
 
     pub fn get_wtxn(&mut self) -> &mut RwTxn<'env> {
-        self.txn
+        &mut self.txn
+    }
+
+    pub fn commit(mut self, db: &Database<Bytes, Unit>) -> Result<(), VectorError> {
+        let txn = &mut self.txn;
+        let mut vec = Vec::with_capacity(self.cache.len() * 128);
+        for (id, level) in self.cache.keys() {
+            if let Some(neighbors) = self.cache.get(&(*id, *level)) {
+                for neighbor in neighbors {
+                    let out_key = VectorCore::out_edges_key(*id, *level, Some(neighbor.get_id()));
+                    let in_key = VectorCore::out_edges_key(neighbor.get_id(), *level, Some(*id));
+                    vec.push(in_key);
+                    vec.push(out_key);
+                }
+            }
+        }
+        vec.sort();
+        for key in vec {
+            db.put(txn, &key, &())?;
+        }
+
+        self.txn.commit().map_err(VectorError::from)
     }
 }
 
-impl<'outer_scope, 'env> Deref for VecTxn<'outer_scope, 'env> {
+impl<'env> Deref for VecTxn<'env> {
     type Target = RoTxn<'env, WithoutTls>;
 
     fn deref(&self) -> &Self::Target {
