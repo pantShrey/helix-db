@@ -37,7 +37,7 @@ pub fn cosine_similarity(from: &[f64], to: &[f64]) -> Result<f64, VectorError> {
 
     #[cfg(target_feature = "avx2")]
     {
-        return cosine_similarity_avx2(from, to);
+        return Ok(cosine_similarity_avx2(from, to));
     }
 
     let mut dot_product = 0.0;
