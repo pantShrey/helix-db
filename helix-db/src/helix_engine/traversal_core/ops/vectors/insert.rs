@@ -1,8 +1,13 @@
+use std::rc::Rc;
+
 use heed3::RoTxn;
 
 use crate::{
     helix_engine::{
-        traversal_core::{traversal_iter::{RwTraversalIterator, RwVecTraversalIterator}, traversal_value::TraversalValue},
+        traversal_core::{
+            traversal_iter::{RwTraversalIterator, RwVecTraversalIterator},
+            traversal_value::TraversalValue,
+        },
         types::GraphError,
         vector_core::{hnsw::HNSW, vector::HVector},
     },
@@ -55,10 +60,13 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertMulti
                 (String::from("is_deleted"), Value::Boolean(false)),
             ]),
         };
-        let vector = self.storage.vectors.insert_with_vec_txn::<F>(self.txn, query, fields);
+        let vector = self
+            .storage
+            .vectors
+            .insert_with_vec_txn::<F>(self.txn, query, fields);
 
         let result = match vector {
-            Ok(vector) => Ok(TraversalValue::Vector(vector)),
+            Ok(vector) => Ok(TraversalValue::Vector(Rc::unwrap_or_clone(vector))),
             Err(e) => Err(GraphError::from(e)),
         };
 
@@ -69,7 +77,6 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertMulti
         }
     }
 }
-
 
 pub trait InsertVAdapter<'a, 'b>: Iterator<Item = Result<TraversalValue, GraphError>> {
     fn insert_v<F>(
@@ -104,7 +111,10 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertVAdap
                 (String::from("is_deleted"), Value::Boolean(false)),
             ]),
         };
-        let vector = self.storage.vectors.insert_with_lmdb_txn::<F>(self.txn, query, fields);
+        let vector = self
+            .storage
+            .vectors
+            .insert_with_lmdb_txn::<F>(self.txn, query, fields);
 
         let result = match vector {
             Ok(vector) => Ok(TraversalValue::Vector(vector)),

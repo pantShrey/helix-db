@@ -5,7 +5,7 @@ use std::{
 };
 
 use heed3::{
-    Database, RoTxn, RwTxn, WithoutTls,
+    Database, PutFlags, RoTxn, RwTxn, WithoutTls,
     types::{Bytes, Unit},
 };
 
@@ -29,11 +29,20 @@ impl<'env> VecTxn<'env> {
         }
     }
 
-    pub fn set_neighbors(&mut self, id: u128, level: usize, neighbors: &BinaryHeap<Rc<HVector>>) {
+    pub fn set_neighbors(
+        &mut self,
+        curr_vec: Rc<HVector>,
+        level: usize,
+        neighbors: &BinaryHeap<Rc<HVector>>,
+    ) {
         // get change sets in neighbors
         let neighbors = neighbors.iter().map(Rc::clone).collect::<HashSet<_>>();
 
-        let old_neighbors = self.cache.get(&(id, level)).cloned().unwrap_or_default();
+        let old_neighbors = self
+            .cache
+            .get(&(curr_vec.get_id(), level))
+            .cloned()
+            .unwrap_or_default();
         let old_neighbors_to_delete = old_neighbors
             .difference(&neighbors)
             .map(Rc::clone)
@@ -45,24 +54,19 @@ impl<'env> VecTxn<'env> {
             .collect::<HashSet<_>>();
 
         for neighbor in old_neighbors_to_delete {
-            if let Some(neighbor_set) = self
-                .cache
-                .get_mut(&(neighbor.get_id(), neighbor.get_level()))
-            {
-                neighbor_set.remove(&neighbor);
+            if let Some(neighbor_set) = self.cache.get_mut(&(neighbor.get_id(), level)) {
+                neighbor_set.remove(&curr_vec);
             }
         }
 
         for neighbor in neighbors_to_add {
-            if let Some(neighbor_set) = self
-                .cache
-                .get_mut(&(neighbor.get_id(), neighbor.get_level()))
-            {
-                neighbor_set.insert(neighbor);
-            }
+            self.cache
+                .entry((neighbor.get_id(), level))
+                .or_insert_with(HashSet::new)
+                .insert(Rc::clone(&curr_vec));
         }
 
-        self.cache.insert((id, level), neighbors);
+        self.cache.insert((curr_vec.get_id(), level), neighbors);
     }
 
     pub fn set_distance(&mut self, id: u128, level: usize, distance: f64) {
@@ -79,8 +83,11 @@ impl<'env> VecTxn<'env> {
     }
 
     pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<Rc<HVector>>) {
+        let neighbors = neighbors.iter().map(Rc::clone).collect::<HashSet<_>>();
         self.cache
-            .insert((id, level), neighbors.iter().map(Rc::clone).collect());
+            .entry((id, level))
+            .and_modify(|x| x.extend(neighbors.clone()))
+            .or_insert(neighbors);
     }
 
     pub fn get_rtxn(&self) -> &RoTxn<'env, WithoutTls> {
@@ -94,18 +101,21 @@ impl<'env> VecTxn<'env> {
     pub fn commit(mut self, db: &Database<Bytes, Unit>) -> Result<(), VectorError> {
         let txn = &mut self.txn;
         let mut vec = Vec::with_capacity(self.cache.len() * 128);
+        let mut vecs = 0;
         for (id, level) in self.cache.keys() {
             if let Some(neighbors) = self.cache.get(&(*id, *level)) {
                 for neighbor in neighbors {
                     let out_key = VectorCore::out_edges_key(*id, *level, Some(neighbor.get_id()));
-                    let in_key = VectorCore::out_edges_key(neighbor.get_id(), *level, Some(*id));
-                    vec.push(in_key);
                     vec.push(out_key);
                 }
+                vecs += 1;
             }
         }
-        vec.sort();
+        // vec.sort();
+        println!("inserting: {:?}", vec.len());
+        println!("vecs: {:?}", vecs);
         for key in vec {
+            // db.put_with_flags(txn, PutFlags::APPEND, &key, &())?;
             db.put(txn, &key, &())?;
         }
 

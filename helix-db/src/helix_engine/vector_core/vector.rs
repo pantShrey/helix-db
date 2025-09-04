@@ -151,6 +151,17 @@ impl HVector {
         })
     }
 
+    pub fn empty_from_id_and_level(id: u128, level: usize) -> Self {
+        HVector {
+            id,
+            // is_deleted: false,
+            level,
+            data: vec![],
+            distance: None,
+            properties: None,
+        }
+    }
+
     #[inline(always)]
     pub fn len(&self) -> usize {
         self.data.len()

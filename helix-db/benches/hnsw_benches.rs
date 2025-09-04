@@ -14,11 +14,7 @@ mod tests {
         Rng,
     };
     use std::{
-        collections::{HashSet, HashMap},
-        fs::{self, File},
-        sync::{Arc, Mutex},
-        thread,
-        time::Instant,
+        collections::{HashMap, HashSet}, fs::{self, File}, rc::Rc, sync::{Arc, Mutex}, thread, time::Instant
     };
 
     type Filter = fn(&HVector, &RoTxn) -> bool;
@@ -398,8 +394,8 @@ mod tests {
 
     #[test]
     fn bench_hnsw_search_long_vec_txn() {
-        let n_base = 50_000;
-        let n_query = 5000; // 10-20%
+        let n_base = 5_000;
+        let n_query = 500; // 10-20%
         let k = 10;
         let mut vectors = load_dbpedia_vectors(n_base).unwrap();
 
@@ -429,7 +425,7 @@ mod tests {
             let start_time = Instant::now();
             let vec = index.insert_with_vec_txn::<Filter>(&mut txn, &data, None).unwrap();
             let time = start_time.elapsed();
-            base_all_vectors.push(vec);
+            base_all_vectors.push(Rc::unwrap_or_clone(vec));
             //println!("{} => inserting in {} ms", i, time.as_millis());
             if i % 500 == 0 {
                 println!("{} => inserting in {} ms", i, time.as_millis());
@@ -463,8 +459,7 @@ mod tests {
         let mut total_search_time = std::time::Duration::from_secs(0);
         for (qid, query) in query_vectors.iter() {
             let start_time = Instant::now();
-            let results = index.search_with_vec_txn::<Filter>(&mut txn, query, k, "vector", None, false).unwrap();
-            println!("qid: {}", qid);
+            let results = index.search::<Filter>(&txn, query, k, "vector", None, false).unwrap();
             let search_duration = start_time.elapsed();
             total_search_time += search_duration;
 

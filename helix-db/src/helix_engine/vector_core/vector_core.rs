@@ -151,13 +151,20 @@ impl VectorCore {
         }
     }
 
-
     #[inline]
     fn set_entry_point(&self, txn: &mut RwTxn, entry: &HVector) -> Result<(), VectorError> {
         let entry_key = ENTRY_POINT_KEY.as_bytes().to_vec();
         self.vectors_db
             .put(txn, &entry_key, &entry.get_id().to_be_bytes())
             .map_err(VectorError::from)?;
+        Ok(())
+    }
+
+    #[inline]
+    fn set_entry_point_with_rc(&self, txn: &mut RwTxn, entry: Rc<HVector>) -> Result<(), VectorError> {
+        let entry_key = ENTRY_POINT_KEY.as_bytes().to_vec();
+        self.vectors_db
+            .put(txn, &entry_key, &entry.get_id().to_be_bytes())?;
         Ok(())
     }
 
@@ -289,11 +296,11 @@ impl VectorCore {
     fn set_neighbours_with_vec_txn(
         &self,
         txn: &mut VecTxn,
-        id: u128,
+        curr_vec: Rc<HVector>,
         neighbors: &BinaryHeap<Rc<HVector>>,
         level: usize,
     ) -> Result<(), VectorError> {
-        txn.set_neighbors(id, level, neighbors);
+        txn.set_neighbors(curr_vec, level, neighbors);
         Ok(())
     }
 
@@ -368,7 +375,7 @@ impl VectorCore {
                 }
                 let distance = neighbor.distance_to(query)?;
                 txn.set_distance(neighbor.get_id(), level, distance);
-                
+
                 if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, &txn.txn)) {
                     result.push(neighbor);
                 }
@@ -652,7 +659,6 @@ impl HNSW for VectorCore {
         Ok(results)
     }
 
-
     fn search_with_vec_txn<F>(
         &self,
         txn: &mut VecTxn,
@@ -702,8 +708,13 @@ impl HNSW for VectorCore {
             },
         )?;
 
-        let results =
-            candidates.to_rc_vec_with_filter::<F, true>(k, filter, label, txn, self.vector_data_db)?;
+        let results = candidates.to_rc_vec_with_filter::<F, true>(
+            k,
+            filter,
+            label,
+            txn,
+            self.vector_data_db,
+        )?;
 
         debug_println!("vector search found {} results", results.len());
         Ok(results)
@@ -714,7 +725,7 @@ impl HNSW for VectorCore {
         txn: &mut VecTxn,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
-    ) -> Result<HVector, VectorError>
+    ) -> Result<Rc<HVector>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
     {
@@ -740,7 +751,7 @@ impl HNSW for VectorCore {
                         &bincode::serialize(&fields)?,
                     )?;
                 }
-                return Ok(query);
+                return Ok(Rc::new(query));
             }
         };
 
@@ -757,6 +768,7 @@ impl HNSW for VectorCore {
                 .clone();
         }
 
+        let query = Rc::new(query);
         for level in (0..=l.min(new_level)).rev() {
             let nearest = self._search_level_with_vec_txn::<F>(
                 txn,
@@ -770,20 +782,20 @@ impl HNSW for VectorCore {
 
             let neighbors =
                 self._select_neighbors_with_vec_txn::<F>(txn, &query, nearest, level, true, None)?;
-            self.set_neighbours_with_vec_txn(txn, query.get_id(), &neighbors, level)?;
-            for e in &neighbors {
+            self.set_neighbours_with_vec_txn(txn, Rc::clone(&query), &neighbors, level)?;
+            for e in neighbors {
                 let id = e.get_id();
                 let e_conns =
                     BinaryHeap::from(self._get_neighbors_with_vec_txn::<F>(txn, id, level, None)?);
                 let e_new_conn = self
                     ._select_neighbors_with_vec_txn::<F>(txn, &query, e_conns, level, true, None)?;
                 // neighbor_updates.push((id, e_new_conn));
-                self.set_neighbours_with_vec_txn(txn, id, &e_new_conn, level)?;
+                self.set_neighbours_with_vec_txn(txn, e, &e_new_conn, level)?;
             }
         }
 
         if new_level > l {
-            self.set_entry_point(txn.get_wtxn(), &query)?;
+            self.set_entry_point_with_rc(txn.get_wtxn(), Rc::clone(&query))?;
         }
 
         if let Some(fields) = fields {
@@ -836,14 +848,8 @@ impl HNSW for VectorCore {
         let l = entry_point.get_level();
         let mut curr_ep = entry_point;
         for level in (new_level + 1..=l).rev() {
-            let nearest = self._search_level_with_lmdb_txn::<F>(
-                txn,
-                &query,
-                &mut curr_ep,
-                1,
-                level,
-                None,
-            )?;
+            let nearest =
+                self._search_level_with_lmdb_txn::<F>(txn, &query, &mut curr_ep, 1, level, None)?;
             curr_ep = nearest
                 .peek()
                 .ok_or(VectorError::VectorCoreError(

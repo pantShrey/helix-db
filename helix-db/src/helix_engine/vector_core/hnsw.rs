@@ -65,7 +65,7 @@ pub trait HNSW {
         txn: &mut VecTxn,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
-    ) -> Result<HVector, VectorError>
+    ) -> Result<Rc<HVector>, VectorError>
     where
         F: Fn(&HVector, &RoTxn) -> bool;
 
