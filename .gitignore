@@ -1,6 +1,6 @@
 .helix/
 target/
 *.log
-test/
-/thoughts/
+thoughts/
 .claude/
+hack/

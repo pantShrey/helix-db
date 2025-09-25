@@ -33,3 +33,11 @@ path = "src/main.rs"
 normal = ["helix-db/server"]
 ingestion = ["helix-db/full"]
 default = ["normal"]
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+tempfile = "3.14"
+mockito = "1.6"
+base64 = "0.22"
+hex = "0.4"
