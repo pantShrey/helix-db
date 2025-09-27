@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BinaryHeap, HashMap, HashSet},
     rc::Rc,
+    time::Duration,
 };
 
 const DB_VECTORS: &str = "vectors"; // for vector data (v:)
@@ -161,7 +162,11 @@ impl VectorCore {
     }
 
     #[inline]
-    fn set_entry_point_with_rc(&self, txn: &mut RwTxn, entry: Rc<HVector>) -> Result<(), VectorError> {
+    fn set_entry_point_with_rc(
+        &self,
+        txn: &mut RwTxn,
+        entry: Rc<HVector>,
+    ) -> Result<(), VectorError> {
         let entry_key = ENTRY_POINT_KEY.as_bytes().to_vec();
         self.vectors_db
             .put(txn, &entry_key, &entry.get_id().to_be_bytes())?;
@@ -363,46 +368,6 @@ impl VectorCore {
         if !should_extend {
             return Ok(cands.take_inord(m));
         }
-
-        /* 
-        let start = std::time::Instant::now();
-
-        
-        let new = cands
-            .iter()
-            .map(|candidate| {
-                let start = std::time::Instant::now();
-                let neighbors = self
-                    ._get_neighbors_with_vec_txn(txn, candidate.get_id(), level, filter)
-                    .unwrap();
-                println!("time taken get_neighbors: {:?}", start.elapsed());
-                let ns = neighbors
-                    .into_par_iter()
-                    .filter_map(|mut neighbor| {
-                        let distance = neighbor.distance_to(query).unwrap();
-                        Arc::make_mut(&mut neighbor).set_distance(distance);
-                        Some(neighbor)
-                    })
-                    .collect::<Vec<_>>();
-
-                ns
-            })
-            .flatten()
-            .collect::<Vec<_>>();
-
-        println!("time taken calc_neighbors: {:?}", start.elapsed());
-
-        let mut result = BinaryHeap::with_capacity(m * cands.len());
-        let mut visited: std::collections::HashSet<u128> = std::collections::HashSet::new();
-        for neighbor in new {
-            if !visited.insert(neighbor.get_id()) {
-                continue;
-            }
-            if filter.map_or(true, |fs| fs.iter().all(|f| f(&neighbor, &txn.txn))) {
-                result.push(neighbor);
-            }
-        }
-         */
         let mut visited: HashSet<u128> = HashSet::new();
         let mut result = BinaryHeap::with_capacity(m * cands.len());
         for candidate in cands.iter() {
@@ -414,14 +379,12 @@ impl VectorCore {
                 }
                 let distance = neighbor.distance_to(query)?;
                 Rc::make_mut(&mut neighbor).set_distance(distance);
-                
 
                 if filter.is_none() || filter.unwrap().iter().all(|f| f(&neighbor, &txn.txn)) {
                     result.push(neighbor);
                 }
             }
         }
-
         result.extend_inord(cands);
         Ok(result.take_inord(m))
     }
