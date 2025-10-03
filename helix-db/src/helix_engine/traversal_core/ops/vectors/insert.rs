@@ -45,7 +45,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertMulti
         query: &[f64],
         label: &str,
         fields: Option<Vec<(String, Value)>>,
-    ) -> RwVecTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
+        ) -> RwVecTraversalIterator<'a, 'b, impl Iterator<Item = Result<TraversalValue, GraphError>>>
     where
         F: Fn(&HVector, &RoTxn) -> bool,
     {
@@ -63,7 +63,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertMulti
         let vector = self
             .storage
             .vectors
-            .insert_with_vec_txn::<F>(self.txn, query, fields);
+            .insert_with_vec_txn::<F>(self.vec_txn, self.txn, query, fields);
 
         let result = match vector {
             Ok(vector) => Ok(TraversalValue::Vector(Rc::unwrap_or_clone(vector))),
@@ -74,6 +74,7 @@ impl<'a, 'b, I: Iterator<Item = Result<TraversalValue, GraphError>>> InsertMulti
             inner: std::iter::once(result),
             storage: self.storage,
             txn: self.txn,
+            vec_txn: self.vec_txn,
         }
     }
 }

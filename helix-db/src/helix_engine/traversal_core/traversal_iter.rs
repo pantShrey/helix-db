@@ -153,7 +153,8 @@ impl<'scope, 'env, I: Iterator<Item = Result<TraversalValue, GraphError>>>
 pub struct RwVecTraversalIterator<'scope, 'env, I> {
     pub inner: I,
     pub storage: Arc<HelixGraphStorage>,
-    pub txn: &'scope mut VecTxn<'env>,
+    pub txn: &'scope mut RwTxn<'env>,
+    pub vec_txn: &'scope mut VecTxn,
 }
 
 // implementing iterator for TraversalIterator
@@ -172,13 +173,15 @@ impl<'scope, 'env, I: Iterator<Item = Result<TraversalValue, GraphError>>>
 {
     pub fn new(
         storage: Arc<HelixGraphStorage>,
-        txn: &'scope mut VecTxn<'env>,
+        txn: &'scope mut RwTxn<'env>,
+        vec_txn: &'scope mut VecTxn,
         inner: I,
     ) -> Self {
         Self {
             inner,
             storage,
             txn,
+            vec_txn,
         }
     }
 
@@ -187,13 +190,6 @@ impl<'scope, 'env, I: Iterator<Item = Result<TraversalValue, GraphError>>>
         I: Iterator<Item = Result<TraversalValue, GraphError>>,
     {
         self.inner.filter_map(|item| item.ok()).collect::<B>()
-    }
-
-    pub fn collect_dedup<B: FromIterator<TraversalValue>>(self) -> B {
-        self.inner
-            .filter_map(|item| item.ok())
-            .unique()
-            .collect::<B>()
     }
 
     pub fn collect_to_obj(self) -> TraversalValue {

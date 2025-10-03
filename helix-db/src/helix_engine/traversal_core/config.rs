@@ -10,6 +10,8 @@ pub struct VectorConfig {
     pub m: Option<usize>,
     pub ef_construction: Option<usize>,
     pub ef_search: Option<usize>,
+    #[serde(default)]
+    pub preload: bool,
 }
 
 impl Default for VectorConfig {
@@ -18,6 +20,7 @@ impl Default for VectorConfig {
             m: Some(16),
             ef_construction: Some(128),
             ef_search: Some(768),
+            preload: false,
         }
     }
 }
@@ -56,6 +59,7 @@ impl Config {
                 m: Some(m),
                 ef_construction: Some(ef_construction),
                 ef_search: Some(ef_search),
+                preload: false,
             }),
             graph_config: Some(GraphConfig {
                 secondary_indices: None,
@@ -161,6 +165,7 @@ impl Default for Config {
                 m: Some(16),
                 ef_construction: Some(128),
                 ef_search: Some(768),
+                preload: false,
             }),
             graph_config: Some(GraphConfig {
                 secondary_indices: None,

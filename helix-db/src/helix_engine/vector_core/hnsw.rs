@@ -31,7 +31,8 @@ pub trait HNSW {
 
     fn search_with_vec_txn<F>(
         &self,
-        txn: &mut VecTxn,
+        vec_txn: &mut VecTxn,
+        txn: &RoTxn,
         query: &[f64],
         k: usize,
         label: &str,
@@ -62,7 +63,8 @@ pub trait HNSW {
 
     fn insert_with_vec_txn<F>(
         &self,
-        txn: &mut VecTxn,
+        vec_txn: &mut VecTxn,
+        txn: &mut RwTxn,
         data: &[f64],
         fields: Option<Vec<(String, Value)>>,
     ) -> Result<Rc<HVector>, VectorError>

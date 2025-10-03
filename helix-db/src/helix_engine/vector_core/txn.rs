@@ -5,26 +5,169 @@ use std::{
 };
 
 use heed3::{
-    Database, RoTxn, RwTxn, WithoutTls,
+    Database, Env, RoTxn, RwTxn, WithoutTls,
     types::{Bytes, Unit},
 };
+use itertools::Itertools;
 
-use crate::helix_engine::{
-    types::VectorError,
-    vector_core::{vector::HVector, vector_core::VectorCore},
+use crate::{
+    helix_engine::{
+        types::VectorError,
+        vector_core::{vector::HVector, vector_core::VectorCore},
+    },
+    protocol::value::Value,
 };
 
-pub struct VecTxn<'env> {
-    pub txn: RwTxn<'env>,
+/// VecTxn provides a transaction-scoped cache for vector operations.
+///
+/// ## In-Memory Preloading
+///
+/// VecTxn supports preloading all existing vectors and edges into memory
+/// for faster access. This is useful when you need to perform many vector
+/// operations and want to avoid repeated LMDB reads.
+///
+/// ### Example Usage:
+///
+/// ```rust
+/// // Standard usage (on-demand loading from LMDB)
+/// let mut vec_txn = VecTxn::new(env.write_txn()?);
+///
+/// // With preloading (loads all vectors/edges into memory)
+/// let mut vec_txn = VecTxn::new_with_preload(
+///     env.write_txn()?,
+///     &vector_core
+/// )?;
+///
+/// // Alternatively, preload after creation
+/// let mut vec_txn = VecTxn::new(env.write_txn()?);
+/// vec_txn.preload_all(&vector_core)?;
+///
+/// // Use the transaction for vector operations
+/// let results = vector_core.search_with_vec_txn(
+///     &mut vec_txn,
+///     query_vector,
+///     10,  // k
+///     "label",
+///     None,  // filter
+///     false  // should_trickle
+/// )?;
+///
+/// // Commit the transaction
+/// vec_txn.commit(&vector_core.edges_db)?;
+/// ```
+pub struct VecTxn {
     pub cache: HashMap<(u128, usize), HashSet<Rc<HVector>>>,
+    // Preloaded vectors cache - stores all vectors when preload is enabled
+    pub vectors_cache: HashMap<(u128, usize), Rc<HVector>>,
+    // Whether this transaction has preloaded all data
+    pub is_preloaded: bool,
 }
 
-impl<'env> VecTxn<'env> {
-    pub fn new(txn: RwTxn<'env>) -> Self {
+impl VecTxn {
+    pub fn new() -> Self {
         Self {
-            txn,
             cache: HashMap::with_capacity(256),
+            vectors_cache: HashMap::new(),
+            is_preloaded: false,
         }
+    }
+
+    /// Create a new VecTxn and preload all vectors and edges into memory
+    pub fn new_with_preload(txn: &RoTxn, vector_core: &VectorCore) -> Result<Self, VectorError> {
+        let vectors_len = vector_core.vectors_db.len(&txn)? as usize;
+        let edges_len = vector_core.edges_db.len(&txn)? as usize;
+
+        let mut vec_txn = Self {
+            cache: HashMap::with_capacity(edges_len),
+            vectors_cache: HashMap::with_capacity(vectors_len),
+            is_preloaded: false,
+        };
+
+        // Preload all data
+        vec_txn.preload_all(txn, vector_core)?;
+        Ok(vec_txn)
+    }
+
+    /// Preload all vectors and edges from LMDB into memory
+    pub fn preload_all(&mut self, txn: &RoTxn, vector_core: &VectorCore) -> Result<(), VectorError> {
+        println!("Preloading vectors and edges into VecTxn memory...");
+
+        // Clear existing caches
+        self.cache.clear();
+        self.vectors_cache.clear();
+
+        // Load all vectors
+        let mut loaded_vectors = 0;
+        let iter = vector_core
+            .vectors_db
+            .prefix_iter(&txn, vector_core.get_vector_prefix())?;
+
+        for result in iter {
+            let (key, value) = result?;
+
+            // Skip non-vector entries (like entry_point)
+            if !key.starts_with(vector_core.get_vector_prefix()) {
+                continue;
+            }
+
+            // Parse key to get id and level
+            let prefix_len = vector_core.get_vector_prefix().len();
+            if key.len() >= prefix_len + 24 {
+                // prefix + id(16) + level(8)
+                let id_bytes = &key[prefix_len..prefix_len + 16];
+                let level_bytes = &key[prefix_len + 16..prefix_len + 24];
+
+                let id = u128::from_be_bytes(id_bytes.try_into().unwrap());
+                let level = usize::from_be_bytes(level_bytes.try_into().unwrap());
+
+                // Deserialize vector
+                let mut vector = HVector::from_bytes(id, level, value)?;
+
+                // Load properties if they exist
+                if let Ok(Some(data)) = vector_core.vector_data_db.get(&txn, &id.to_be_bytes())
+                {
+                    let properties: HashMap<String, Value> = bincode::deserialize(&data)?;
+                    vector.properties = Some(properties);
+                }
+
+                // Store in vectors cache
+                self.vectors_cache.insert((id, level), Rc::new(vector));
+                loaded_vectors += 1;
+            }
+        }
+
+        // Load all edges into neighbor cache
+        let mut loaded_edges = 0;
+        let iter = vector_core.edges_db.iter(&txn)?;
+
+        for result in iter {
+            let (key, _) = result?;
+
+            // Parse edge key: source_id(16) + level(8) + sink_id(16)
+            if key.len() == 40 {
+                // 16 + 8 + 16 bytes
+                let source_id = u128::from_be_bytes(key[0..16].try_into().unwrap());
+                let level = usize::from_be_bytes(key[16..24].try_into().unwrap());
+                let sink_id = u128::from_be_bytes(key[24..40].try_into().unwrap());
+
+                // Get the neighbor vector from vectors_cache
+                if let Some(neighbor_vec) = self.vectors_cache.get(&(sink_id, level)) {
+                    self.cache
+                        .entry((source_id, level))
+                        .or_insert_with(HashSet::new)
+                        .insert(Rc::clone(neighbor_vec));
+                    loaded_edges += 1;
+                }
+            }
+        }
+
+        println!(
+            "Preloaded {} vectors and {} edges into VecTxn memory",
+            loaded_vectors, loaded_edges
+        );
+
+        self.is_preloaded = true;
+        Ok(())
     }
 
     pub fn set_neighbors(
@@ -64,9 +207,19 @@ impl<'env> VecTxn<'env> {
     }
 
     pub fn get_neighbors(&self, id: u128, level: usize) -> Option<Vec<Rc<HVector>>> {
+        // First check the neighbors cache (which includes preloaded edges and modifications)
         self.cache
             .get(&(id, level))
             .map(|x| x.iter().map(Rc::clone).collect())
+    }
+
+    /// Get a vector from cache if preloaded
+    pub fn get_vector(&self, id: u128, level: usize) -> Option<Rc<HVector>> {
+        if self.is_preloaded {
+            self.vectors_cache.get(&(id, level)).map(Rc::clone)
+        } else {
+            None
+        }
     }
 
     pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<Rc<HVector>>) {
@@ -74,44 +227,33 @@ impl<'env> VecTxn<'env> {
         self.cache.entry((id, level)).or_default().extend(neighbors);
     }
 
-    pub fn get_rtxn(&self) -> &RoTxn<'env, WithoutTls> {
-        &self.txn
-    }
-
-    pub fn get_wtxn(&mut self) -> &mut RwTxn<'env> {
-        &mut self.txn
-    }
-
-    pub fn commit(mut self, db: &Database<Bytes, Unit>) -> Result<(), VectorError> {
-        let txn = &mut self.txn;
-        let mut vec = HashSet::with_capacity(self.cache.len() * 128);
-        for (id, level) in self.cache.keys() {
-            if let Some(neighbors) = self.cache.get(&(*id, *level)) {
-                for neighbor in neighbors {
-                    if neighbor.get_id() == *id {
-                        continue;
+    pub fn commit(self, env: &Env, db: &Database<Bytes, Unit>) -> Result<(), VectorError> {
+        let chunk_size = 250_000;
+        for chunk in &self.cache.keys().chunks(chunk_size) {
+            let mut txn = env.write_txn()?;
+            let mut vec = HashSet::with_capacity(chunk_size);
+            for (id, level) in chunk {
+                if let Some(neighbors) = self.cache.get(&(*id, *level)) {
+                    for neighbor in neighbors {
+                        if neighbor.get_id() == *id {
+                            continue;
+                        }
+                        let out_key =
+                            VectorCore::out_edges_key(*id, *level, Some(neighbor.get_id()));
+                        let in_key =
+                            VectorCore::out_edges_key(neighbor.get_id(), *level, Some(*id));
+                        vec.insert(out_key);
+                        vec.insert(in_key);
                     }
-                    let out_key = VectorCore::out_edges_key(*id, *level, Some(neighbor.get_id()));
-                    let in_key = VectorCore::out_edges_key(neighbor.get_id(), *level, Some(*id));
-                    vec.insert(out_key);
-                    vec.insert(in_key);
                 }
             }
+            for key in vec.into_iter().sorted() {
+                // db.put_with_flags(txn, PutFlags::APPEND, &key, &())?;
+                db.put(&mut txn, &key, &())?;
+            }
+            txn.commit()?;
         }
-        // vec.sort();
-        for key in vec {
-            // db.put_with_flags(txn, PutFlags::APPEND, &key, &())?;
-            db.put(txn, &key, &())?;
-        }
-
-        self.txn.commit().map_err(VectorError::from)
+        Ok(())
     }
 }
 
-impl<'env> Deref for VecTxn<'env> {
-    type Target = RoTxn<'env, WithoutTls>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.txn
-    }
-}

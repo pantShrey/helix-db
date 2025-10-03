@@ -418,12 +418,12 @@ mod tests {
         let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
         let mut total_insertion_time = std::time::Duration::from_secs(0);
         
-        let mut txn = VecTxn::new(txn);
+        let mut vec_txn = VecTxn::new();
         let mut base_all_vectors: Vec<HVector> = Vec::new();
         let over_all_time = Instant::now();
         for (i, data) in base_vectors.iter().enumerate() {
             let start_time = Instant::now();
-            let vec = index.insert_with_vec_txn::<Filter>(&mut txn, &data, None).unwrap();
+            let vec = index.insert_with_vec_txn::<Filter>(&mut vec_txn, &mut txn, &data, None).unwrap();
             let time = start_time.elapsed();
             base_all_vectors.push(Rc::unwrap_or_clone(vec));
             //println!("{} => inserting in {} ms", i, time.as_millis());
@@ -433,10 +433,10 @@ mod tests {
             }
             total_insertion_time += time;
         }
-        txn.commit(&index.edges_db).unwrap();
+        vec_txn.commit(&env, &index.edges_db).unwrap();
 
         let txn = env.write_txn().unwrap();
-        let mut txn = VecTxn::new(txn);
+        let mut vec_txn = VecTxn::new();
         println!("{:?}", index.config);
 
         println!(
@@ -459,7 +459,7 @@ mod tests {
         let mut total_search_time = std::time::Duration::from_secs(0);
         for (qid, query) in query_vectors.iter() {
             let start_time = Instant::now();
-            let results = index.search_with_vec_txn::<Filter>(&mut txn, query, k, "vector", None, false).unwrap();
+            let results = index.search_with_vec_txn::<Filter>(&mut vec_txn, &txn, query, k, "vector", None, false).unwrap();
             let search_duration = start_time.elapsed();
             total_search_time += search_duration;
 
