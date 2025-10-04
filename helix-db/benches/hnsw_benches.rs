@@ -433,6 +433,7 @@ mod tests {
             }
             total_insertion_time += time;
         }
+        txn.commit().unwrap();
         vec_txn.commit(&env, &index.edges_db).unwrap();
 
         let txn = env.write_txn().unwrap();
