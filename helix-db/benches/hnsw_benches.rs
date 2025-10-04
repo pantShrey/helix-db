@@ -21,7 +21,9 @@ mod tests {
 
     fn setup_temp_env() -> Env {
         let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().to_str().unwrap();
+        // let path = temp_dir.path().to_str().unwrap();
+        let home = std::env::var("HOME").unwrap();
+        let path = format!("{}/Github/helix-db-core/tmp/hnsw_benches", home);
 
         unsafe {
             EnvOpenOptions::new()
@@ -434,7 +436,7 @@ mod tests {
             total_insertion_time += time;
         }
         txn.commit().unwrap();
-        vec_txn.commit(&env, &index.edges_db).unwrap();
+        vec_txn.commit(&env, &index).unwrap();
 
         let txn = env.write_txn().unwrap();
         let mut vec_txn = VecTxn::new();
@@ -504,7 +506,119 @@ mod tests {
         assert!(total_recall >= 0.8, "recall not high enough!");
         assert!(false);
     }
+
+
+    #[test]
+    fn bench_hnsw_search_long_lmdb_txn_with_preload() {
+        let n_base = 5_000;
+        let n_query = 500; // 10-20%
+        let k = 10;
+        let mut vectors = load_dbpedia_vectors(n_base).unwrap();
+
+        let mut rng = rand::rng();
+        vectors.shuffle(&mut rng);
+
+        let base_vectors = &vectors[..n_base - n_query];
+        let query_vectors = vectors[n_base - n_query..]
+            .to_vec()
+            .iter()
+            .enumerate()
+            .map(|(i, x)| (i + 1, x.clone()))
+            .collect::<Vec<(usize, Vec<f64>)>>();
+
+        println!("num of base vecs: {}", base_vectors.len());
+        println!("num of query vecs: {}", query_vectors.len());
+
+        let env = setup_temp_env();
+        let mut txn = env.write_txn().unwrap();
+        let index = VectorCore::new(&env, &mut txn, HNSWConfig::new(None, None, None)).unwrap();
+        let mut total_insertion_time = std::time::Duration::from_secs(0);
+        
+        let mut vec_txn = VecTxn::new_with_preload(&txn, &index).unwrap();
+        let mut base_all_vectors: Vec<HVector> = Vec::new();
+        let over_all_time = Instant::now();
+        for (i, data) in base_vectors.iter().enumerate() {
+            let start_time = Instant::now();
+            let vec = index.insert_with_vec_txn::<Filter>(&mut vec_txn, &mut txn, &data, None).unwrap();
+            let time = start_time.elapsed();
+            base_all_vectors.push(Rc::unwrap_or_clone(vec));
+            //println!("{} => inserting in {} ms", i, time.as_millis());
+            if i % 500 == 0 {
+                println!("{} => inserting in {} ms", i, time.as_millis());
+                println!("time taken so far: {:?}", over_all_time.elapsed());
+            }
+            total_insertion_time += time;
+        }
+        txn.commit().unwrap();
+        vec_txn.commit(&env, &index).unwrap();
+
+        let txn = env.read_txn().unwrap();
+        println!("{:?}", index.config);
+
+        println!(
+            "total insertion time: {:.2?} seconds",
+            total_insertion_time.as_secs_f64()
+        );
+        println!(
+            "average insertion time per vec: {:.2?} milliseconds",
+            total_insertion_time.as_millis() as f64 / n_base as f64
+        );
+
+        let ground_truths = calc_ground_truths(base_all_vectors, &query_vectors, k);
+        println!("calculating ground truths");
+
+        println!("searching and comparing...");
+        let test_id = format!("k = {} with {} queries", k, n_query);
+
+        let mut total_recall = 0.0;
+        let mut total_precision = 0.0;
+        let mut total_search_time = std::time::Duration::from_secs(0);
+        for (qid, query) in query_vectors.iter() {
+            let start_time = Instant::now();
+            let results = index.search::<Filter>(&txn, query, k, "vector", None, false).unwrap();
+            let search_duration = start_time.elapsed();
+            total_search_time += search_duration;
+
+            let result_indices = results
+                .into_iter()
+                .map(|hvec| hvec.get_id())
+                .collect::<HashSet<u128>>();
+
+            let gt_indices = ground_truths
+                .get(&qid)
+                .unwrap()
+                .clone()
+                .into_iter()
+                .collect::<HashSet<u128>>();
+
+            //println!("gt: {:?}\nresults: {:?}\n", gt_indices, result_indices);
+            let true_positives = result_indices.intersection(&gt_indices).count();
+
+            let recall: f64 = true_positives as f64 / gt_indices.len() as f64;
+            let precision: f64 = true_positives as f64 / result_indices.len() as f64;
+
+            total_recall += recall;
+            total_precision += precision;
+        }
+
+        println!(
+            "total search time: {:.2?} seconds",
+            total_search_time.as_secs_f64()
+        );
+        println!(
+            "average search time per query: {:.2?} milliseconds",
+            total_search_time.as_millis() as f64 / n_query as f64
+        );
+
+        total_recall = total_recall / n_query as f64;
+        total_precision = total_precision / n_query as f64;
+        println!(
+            "{}: avg. recall: {:.4?}, avg. precision: {:.4?}",
+            test_id, total_recall, total_precision,
+        );
+        assert!(total_recall >= 0.8, "recall not high enough!");
+        assert!(false);
+    }
+
+    // TODO: memory benchmark (only the hnsw index ofc)
 }
-
-// TODO: memory benchmark (only the hnsw index ofc)
-

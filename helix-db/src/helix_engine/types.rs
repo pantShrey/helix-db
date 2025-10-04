@@ -197,3 +197,9 @@ impl From<bincode::Error> for VectorError {
         VectorError::ConversionError(format!("bincode error: {error}"))
     }
 }
+
+impl From<&str> for VectorError {
+    fn from(error: &str) -> Self {
+        VectorError::ConversionError(format!("Conversion error: {error}"))
+    }
+}

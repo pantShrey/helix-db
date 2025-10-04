@@ -91,7 +91,7 @@ impl VectorCore {
 
     /// Vector key: [v, id, ]
     #[inline(always)]
-    fn vector_key(id: u128, level: usize) -> Vec<u8> {
+    pub fn vector_key(id: u128, level: usize) -> Vec<u8> {
         [VECTOR_PREFIX, &id.to_be_bytes(), &level.to_be_bytes()].concat()
     }
 
@@ -122,7 +122,7 @@ impl VectorCore {
     }
 
     #[inline]
-    fn get_entry_point_rc(&self, txn: &RoTxn) -> Result<Rc<HVector>, VectorError> {
+    fn get_entry_point_rc(&self, txn: &RoTxn, level: Option<usize>) -> Result<Rc<HVector>, VectorError> {
         let ep_id = self.vectors_db.get(txn, ENTRY_POINT_KEY.as_bytes())?;
         if let Some(ep_id) = ep_id {
             let mut arr = [0u8; 16];
@@ -130,16 +130,16 @@ impl VectorCore {
             arr[..len].copy_from_slice(&ep_id[..len]);
 
             let ep = self
-                .get_vector(txn, u128::from_be_bytes(arr), 0, true)
+                .get_vector(txn, u128::from_be_bytes(arr), level.unwrap_or(0), true)
                 .map_err(|_| VectorError::EntryPointNotFound)?;
             Ok(Rc::new(ep))
         } else {
-            Err(VectorError::EntryPointNotFound)
+            Err(VectorError::from("entry point ID not found"))
         }
     }
 
     #[inline]
-    fn get_entry_point(&self, txn: &RoTxn) -> Result<HVector, VectorError> {
+    pub fn get_entry_point(&self, txn: &RoTxn) -> Result<HVector, VectorError> {
         let ep_id = self.vectors_db.get(txn, ENTRY_POINT_KEY.as_bytes())?;
         if let Some(ep_id) = ep_id {
             let mut arr = [0u8; 16];
@@ -151,12 +151,12 @@ impl VectorCore {
                 .map_err(|_| VectorError::EntryPointNotFound)?;
             Ok(ep)
         } else {
-            Err(VectorError::EntryPointNotFound)
+            Err(VectorError::from("entry point ID not found"))
         }
     }
 
     #[inline]
-    fn set_entry_point(&self, txn: &mut RwTxn, entry: &HVector) -> Result<(), VectorError> {
+    pub fn set_entry_point(&self, txn: &mut RwTxn, entry: &HVector) -> Result<(), VectorError> {
         let entry_key = ENTRY_POINT_KEY.as_bytes().to_vec();
         self.vectors_db
             .put(txn, &entry_key, &entry.get_id().to_be_bytes())
@@ -227,11 +227,7 @@ impl VectorCore {
             }
 
             // Try to get from VecTxn cache first if preloaded
-            let vector = if let Some(cached_vec) = vec_txn.get_vector(neighbor_id, level) {
-                cached_vec
-            } else {
-                Rc::new(self.get_vector(txn, neighbor_id, level, false)?)
-            };
+            let vector = vec_txn.vec_txn_get_vector(neighbor_id, level).unwrap();
 
             let passes_filters = match filter {
                 Some(filter_slice) => filter_slice.iter().all(|f| f(&vector, txn)),
@@ -680,7 +676,7 @@ impl HNSW for VectorCore {
     {
         let query = HVector::from_slice(0, query.to_vec());
 
-        let mut entry_point = self.get_entry_point_rc(txn)?;
+        let mut entry_point = self.get_entry_point_rc(txn, Some(query.get_level()))?;
 
         let ef = self.config.ef;
         let curr_level = entry_point.get_level();
@@ -742,25 +738,23 @@ impl HNSW for VectorCore {
         let new_level = self.get_new_level();
 
         let mut query = HVector::from_slice(0, data.to_vec());
-        self.put_vector(txn, &query)?;
-        query.level = new_level;
-        if new_level > 0 {
-            self.put_vector(txn, &query)?;
-        }
+        vec_txn.vec_txn_put_vector(&query, new_level);
 
-        let entry_point = match self.get_entry_point_rc(txn) {
+        let entry_point = match self.get_entry_point_rc(txn, Some(query.get_level())) {
             Ok(ep) => ep,
             Err(_) => {
+                self.put_vector(txn, &query)?;
+
                 self.set_entry_point(txn, &query)?;
                 query.set_distance(0.0);
 
-                if let Some(fields) = fields {
-                    self.vector_data_db.put(
-                        txn,
-                        &query.get_id().to_be_bytes(),
-                        &bincode::serialize(&fields)?,
-                    )?;
-                }
+                // if let Some(fields) = fields {
+                //     self.vector_data_db.put(
+                //         txn,
+                //         &query.get_id().to_be_bytes(),
+                //         &bincode::serialize(&fields)?,
+                //     )?;
+                // }
                 return Ok(Rc::new(query));
             }
         };
@@ -768,8 +762,15 @@ impl HNSW for VectorCore {
         let l = entry_point.get_level();
         let mut curr_ep = entry_point;
         for level in (new_level + 1..=l).rev() {
-            let nearest =
-                self._search_level_with_vec_txn::<F>(vec_txn, txn, &query, &mut curr_ep, 1, level, None)?;
+            let nearest = self._search_level_with_vec_txn::<F>(
+                vec_txn,
+                txn,
+                &query,
+                &mut curr_ep,
+                1,
+                level,
+                None,
+            )?;
             curr_ep = nearest
                 .peek()
                 .ok_or(VectorError::VectorCoreError(
@@ -791,21 +792,25 @@ impl HNSW for VectorCore {
             )?;
             curr_ep = nearest.peek().unwrap().clone();
 
-            let neighbors =
-                self._select_neighbors_with_vec_txn::<F>(vec_txn, txn, &query, nearest, level, true, None)?;
+            let neighbors = self._select_neighbors_with_vec_txn::<F>(
+                vec_txn, txn, &query, nearest, level, true, None,
+            )?;
             self.set_neighbours_with_vec_txn(vec_txn, Rc::clone(&query), &neighbors, level)?;
             for e in neighbors {
                 let id = e.get_id();
-                let e_conns =
-                    BinaryHeap::from(self._get_neighbors_with_vec_txn::<F>(vec_txn, txn, id, level, None)?);
-                let e_new_conn = self
-                    ._select_neighbors_with_vec_txn::<F>(vec_txn, txn, &query, e_conns, level, true, None)?;
+                let e_conns = BinaryHeap::from(
+                    self._get_neighbors_with_vec_txn::<F>(vec_txn, txn, id, level, None)?,
+                );
+                let e_new_conn = self._select_neighbors_with_vec_txn::<F>(
+                    vec_txn, txn, &query, e_conns, level, true, None,
+                )?;
                 // neighbor_updates.push((id, e_new_conn));
                 self.set_neighbours_with_vec_txn(vec_txn, e, &e_new_conn, level)?;
             }
         }
 
         if new_level > l {
+            self.put_vector(txn, &query)?;
             self.set_entry_point_with_rc(txn, Rc::clone(&query))?;
         }
 
@@ -901,6 +906,7 @@ impl HNSW for VectorCore {
         }
 
         if new_level > l {
+            self.put_vector(txn, &query)?;
             self.set_entry_point(txn, &query)?;
         }
 

@@ -89,7 +89,11 @@ impl VecTxn {
     }
 
     /// Preload all vectors and edges from LMDB into memory
-    pub fn preload_all(&mut self, txn: &RoTxn, vector_core: &VectorCore) -> Result<(), VectorError> {
+    pub fn preload_all(
+        &mut self,
+        txn: &RoTxn,
+        vector_core: &VectorCore,
+    ) -> Result<(), VectorError> {
         println!("Preloading vectors and edges into VecTxn memory...");
 
         // Clear existing caches
@@ -124,8 +128,7 @@ impl VecTxn {
                 let mut vector = HVector::from_bytes(id, level, value)?;
 
                 // Load properties if they exist
-                if let Ok(Some(data)) = vector_core.vector_data_db.get(&txn, &id.to_be_bytes())
-                {
+                if let Ok(Some(data)) = vector_core.vector_data_db.get(&txn, &id.to_be_bytes()) {
                     let properties: HashMap<String, Value> = bincode::deserialize(&data)?;
                     vector.properties = Some(properties);
                 }
@@ -214,11 +217,22 @@ impl VecTxn {
     }
 
     /// Get a vector from cache if preloaded
-    pub fn get_vector(&self, id: u128, level: usize) -> Option<Rc<HVector>> {
-        if self.is_preloaded {
-            self.vectors_cache.get(&(id, level)).map(Rc::clone)
-        } else {
-            None
+    pub fn vec_txn_get_vector(&self, id: u128, level: usize) -> Option<Rc<HVector>> {
+        self.vectors_cache.get(&(id, level)).map(Rc::clone)
+    }
+
+    pub fn vec_txn_put_vector(&mut self, vector: &HVector, level: usize) {
+        let mut vector_at_level = vector.clone();
+        vector_at_level.level = level;
+        let vector_at_level = Rc::new(vector_at_level);
+        self.vectors_cache
+            .insert((vector_at_level.get_id(), level), vector_at_level.clone());
+
+        if level > 0 {
+            let mut vector_at_0 = vector.clone();
+            vector_at_0.level = 0;
+            self.vectors_cache
+                .insert((vector_at_0.get_id(), 0), Rc::new(vector_at_0));
         }
     }
 
@@ -227,33 +241,76 @@ impl VecTxn {
         self.cache.entry((id, level)).or_default().extend(neighbors);
     }
 
-    pub fn commit(self, env: &Env, db: &Database<Bytes, Unit>) -> Result<(), VectorError> {
-        let chunk_size = 250_000;
-        for chunk in &self.cache.keys().chunks(chunk_size) {
+    pub fn commit(self, env: &Env, vector_core: &VectorCore) -> Result<(), VectorError> {
+        let mut txn = env.write_txn()?;
+        let vec_len = vector_core.vectors_db.len(&txn)? as usize;
+        let edge_len = vector_core.edges_db.len(&txn)? as usize;
+        println!("Existing LMDB: {} vectors, {} edges", vec_len, edge_len);
+
+        // get entry point
+        let entry_point = vector_core.get_entry_point(&txn)?;
+
+        println!("Wiping old data from LMDB...");
+        vector_core.vectors_db.clear(&mut txn)?;
+        vector_core.edges_db.clear(&mut txn)?;
+
+        // put entry point
+        vector_core.set_entry_point(&mut txn, &entry_point)?;
+
+        txn.commit()?;
+
+        println!("Putting vectors into LMDB...");
+        println!("Vectors cache size: {}", self.vectors_cache.len());
+        println!(
+            "Cache size: {}",
+            self.cache.values().map(|x| x.len()).sum::<usize>()
+        );
+
+        let vector_chunk_size = 250_000;
+        for chunk in &self
+            .vectors_cache
+            .iter()
+            .sorted_by(|(_, a), (_, b)| a.get_id().cmp(&b.get_id()))
+            .chunks(vector_chunk_size)
+        {
+            let mut txn = env.write_txn()?;
+            for ((id, level), vector) in chunk {
+                vector_core.vectors_db.put(
+                    &mut txn,
+                    &VectorCore::vector_key(*id, *level),
+                    &vector.to_bytes(),
+                )?;
+                if let Some(properties) = &vector.properties {
+                    vector_core.vector_data_db.put(
+                        &mut txn,
+                        &id.to_be_bytes(),
+                        &bincode::serialize(&properties)?,
+                    )?;
+                }
+            }
+            txn.commit()?;
+        }
+
+        let chunk_size = 1_000_000;
+        for chunk in &self.cache.iter().chunks(chunk_size) {
             let mut txn = env.write_txn()?;
             let mut vec = HashSet::with_capacity(chunk_size);
-            for (id, level) in chunk {
-                if let Some(neighbors) = self.cache.get(&(*id, *level)) {
-                    for neighbor in neighbors {
-                        if neighbor.get_id() == *id {
-                            continue;
-                        }
-                        let out_key =
-                            VectorCore::out_edges_key(*id, *level, Some(neighbor.get_id()));
-                        let in_key =
-                            VectorCore::out_edges_key(neighbor.get_id(), *level, Some(*id));
-                        vec.insert(out_key);
-                        vec.insert(in_key);
+            for ((id, level), neighbours) in chunk {
+                for neighbor in neighbours {
+                    if neighbor.get_id() == *id {
+                        continue;
                     }
+                    let out_key = VectorCore::out_edges_key(*id, *level, Some(neighbor.get_id()));
+                    let in_key = VectorCore::out_edges_key(neighbor.get_id(), *level, Some(*id));
+                    vec.insert(out_key);
+                    vec.insert(in_key);
                 }
             }
             for key in vec.into_iter().sorted() {
-                // db.put_with_flags(txn, PutFlags::APPEND, &key, &())?;
-                db.put(&mut txn, &key, &())?;
+                vector_core.edges_db.put(&mut txn, &key, &())?;
             }
             txn.commit()?;
         }
         Ok(())
     }
 }
-
