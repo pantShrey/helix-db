@@ -71,21 +71,6 @@ pub trait HNSW {
     where
         F: Fn(&HVector, &RoTxn) -> bool;
 
-    /// Get all vectors from the index at a specific level
-    ///
-    /// # Arguments
-    ///
-    /// * `txn` - The read-only transaction to use for retrieving vectors
-    /// * `level` - A usize for which level to get all vectors from
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing a `Vec` of `HVector` if successful
-    fn get_all_vectors(
-        &self,
-        txn: &RoTxn,
-        level: Option<usize>,
-    ) -> Result<Vec<HVector>, VectorError>;
 
     /// Delete a vector from the index
     ///
@@ -111,7 +96,7 @@ pub trait HNSW {
         &self,
         txn: &RoTxn,
         id: u128,
-        level: usize,
+        level: u8,
         with_data: bool,
     ) -> Result<HVector, VectorError>;
 }

@@ -56,9 +56,9 @@ use crate::{
 /// vec_txn.commit(&vector_core.edges_db)?;
 /// ```
 pub struct VecTxn {
-    pub cache: HashMap<(u128, usize), HashSet<Rc<HVector>>>,
+    pub cache: HashMap<(u128, u8), HashSet<Rc<HVector>>>,
     // Preloaded vectors cache - stores all vectors when preload is enabled
-    pub vectors_cache: HashMap<(u128, usize), Rc<HVector>>,
+    pub vectors_cache: HashMap<(u128, u8), Rc<HVector>>,
     // Whether this transaction has preloaded all data
     pub is_preloaded: bool,
 }
@@ -104,25 +104,18 @@ impl VecTxn {
         let mut loaded_vectors = 0;
         let iter = vector_core
             .vectors_db
-            .prefix_iter(&txn, vector_core.get_vector_prefix())?;
+            .iter(&txn)?;
 
         for result in iter {
             let (key, value) = result?;
 
-            // Skip non-vector entries (like entry_point)
-            if !key.starts_with(vector_core.get_vector_prefix()) {
-                continue;
-            }
-
             // Parse key to get id and level
-            let prefix_len = vector_core.get_vector_prefix().len();
-            if key.len() >= prefix_len + 24 {
+            if key.len() == 17 {
                 // prefix + id(16) + level(8)
-                let id_bytes = &key[prefix_len..prefix_len + 16];
-                let level_bytes = &key[prefix_len + 16..prefix_len + 24];
+                let id_bytes = &key[..16];
+                let level = key[16];
 
                 let id = u128::from_be_bytes(id_bytes.try_into().unwrap());
-                let level = usize::from_be_bytes(level_bytes.try_into().unwrap());
 
                 // Deserialize vector
                 let mut vector = HVector::from_bytes(id, level, value)?;
@@ -146,15 +139,18 @@ impl VecTxn {
         for result in iter {
             let (key, _) = result?;
 
-            // Parse edge key: source_id(16) + level(8) + sink_id(16)
-            if key.len() == 40 {
-                // 16 + 8 + 16 bytes
+            // Parse edge key: source_id(16) + level(1) + sink_id(16)
+            if key.len() == 33 {
+                // 16 + 1 + 16 bytes
                 let source_id = u128::from_be_bytes(key[0..16].try_into().unwrap());
-                let level = usize::from_be_bytes(key[16..24].try_into().unwrap());
-                let sink_id = u128::from_be_bytes(key[24..40].try_into().unwrap());
+                let level = key[16];
+                let sink_id = u128::from_be_bytes(key[17..33].try_into().unwrap());
 
-                // Get the neighbor vector from vectors_cache
-                if let Some(neighbor_vec) = self.vectors_cache.get(&(sink_id, level)) {
+                // Get the neighbor vector from vectors_cache, fallback to level 0 if not found
+                let neighbor_vec = self.vectors_cache.get(&(sink_id, level))
+                    .or_else(|| self.vectors_cache.get(&(sink_id, 0)));
+
+                if let Some(neighbor_vec) = neighbor_vec {
                     self.cache
                         .entry((source_id, level))
                         .or_insert_with(HashSet::new)
@@ -176,7 +172,7 @@ impl VecTxn {
     pub fn set_neighbors(
         &mut self,
         curr_vec: Rc<HVector>,
-        level: usize,
+        level: u8,
         neighbors: &BinaryHeap<Rc<HVector>>,
     ) {
         // get change sets in neighbors
@@ -209,7 +205,7 @@ impl VecTxn {
         self.cache.insert((curr_vec.get_id(), level), neighbors);
     }
 
-    pub fn get_neighbors(&self, id: u128, level: usize) -> Option<Vec<Rc<HVector>>> {
+    pub fn get_neighbors(&self, id: u128, level: u8) -> Option<Vec<Rc<HVector>>> {
         // First check the neighbors cache (which includes preloaded edges and modifications)
         self.cache
             .get(&(id, level))
@@ -217,28 +213,39 @@ impl VecTxn {
     }
 
     /// Get a vector from cache if preloaded
-    pub fn vec_txn_get_vector(&self, id: u128, level: usize) -> Option<Rc<HVector>> {
-        self.vectors_cache.get(&(id, level)).map(Rc::clone)
+    pub fn vec_txn_get_vector(&self, id: u128, level: u8) -> Option<Rc<HVector>> {
+        self.vectors_cache
+            .get(&(id, level))
+            .map(Rc::clone)
+            .or_else(|| self.vectors_cache.get(&(id, 0)).map(Rc::clone))
     }
 
-    pub fn vec_txn_put_vector(&mut self, vector: &HVector, level: usize) {
-        let mut vector_at_level = vector.clone();
-        vector_at_level.level = level;
-        let vector_at_level = Rc::new(vector_at_level);
+    pub fn vec_txn_put_vector(&mut self, vector: &HVector, level: u8) {
+        // The vector's level field should always be its max level
+        // The level parameter only determines the storage KEY
+        let mut vec_with_correct_level = vector.clone();
+        vec_with_correct_level.level = level;
+        let vector_rc = Rc::new(vec_with_correct_level);
+
         self.vectors_cache
-            .insert((vector_at_level.get_id(), level), vector_at_level.clone());
+            .insert((vector_rc.get_id(), level), vector_rc.clone());
 
         if level > 0 {
-            let mut vector_at_0 = vector.clone();
-            vector_at_0.level = 0;
+            // Store at level 0 too, but keep the same max level in the data
             self.vectors_cache
-                .insert((vector_at_0.get_id(), 0), Rc::new(vector_at_0));
+                .insert((vector_rc.get_id(), 0), vector_rc.clone());
         }
     }
 
-    pub fn insert_neighbors(&mut self, id: u128, level: usize, neighbors: &Vec<Rc<HVector>>) {
+    pub fn insert_neighbors(&mut self, id: u128, level: u8, neighbors: &Vec<Rc<HVector>>) {
         let neighbors = neighbors.iter().map(Rc::clone).collect::<HashSet<_>>();
         self.cache.entry((id, level)).or_default().extend(neighbors);
+    }
+
+    /// Clear the edges cache. Call this after preload but before re-inserting vectors
+    /// to avoid stale Rc references to old vectors.
+    pub fn clear_edges_cache(&mut self) {
+        self.cache.clear();
     }
 
     pub fn commit(self, env: &Env, vector_core: &VectorCore) -> Result<(), VectorError> {
@@ -247,8 +254,12 @@ impl VecTxn {
         let edge_len = vector_core.edges_db.len(&txn)? as usize;
         println!("Existing LMDB: {} vectors, {} edges", vec_len, edge_len);
 
-        // get entry point
-        let entry_point = vector_core.get_entry_point(&txn)?;
+        // Find entry point from vectors_cache (vector with highest level)
+        let entry_point = self
+            .vectors_cache
+            .values()
+            .max_by_key(|v| v.get_level())
+            .ok_or(VectorError::from("no vectors in cache"))?;
 
         println!("Wiping old data from LMDB...");
         vector_core.vectors_db.clear(&mut txn)?;
